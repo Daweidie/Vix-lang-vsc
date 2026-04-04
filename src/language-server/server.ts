@@ -39,6 +39,37 @@ let hasConfigurationCapability = false;
 let hasWorkspaceFolderCapability = false;
 let hasDiagnosticRelatedInformationCapability = false;
 let hasPullDiagnosticCapability = false;
+type VixUILanguage = 'zh-cn' | 'en';
+
+interface VixServerSettings {
+    language: VixUILanguage;
+}
+
+const defaultSettings: VixServerSettings = { language: 'zh-cn' };
+let globalSettings: VixServerSettings = defaultSettings;
+
+function normalizeLanguage(value: unknown): VixUILanguage {
+    if (value === 'en') {
+        return 'en';
+    }
+    return 'zh-cn';
+}
+
+function t(zh: string, en: string): string {
+    return globalSettings.language === 'en' ? en : zh;
+}
+
+async function refreshSettings(): Promise<void> {
+    if (!hasConfigurationCapability) {
+        globalSettings = defaultSettings;
+        return;
+    }
+
+    const config = await connection.workspace.getConfiguration({ section: 'vix' }) as { language?: string } | undefined;
+    globalSettings = {
+        language: normalizeLanguage(config?.language)
+    };
+}
 
 connection.onInitialize((params: InitializeParams) => {
     const capabilities = params.capabilities;
@@ -84,13 +115,29 @@ connection.onInitialize((params: InitializeParams) => {
 
 connection.onInitialized(() => {
     if (hasConfigurationCapability) {
-        connection.client.register(DidChangeConfigurationNotification.type, undefined);
+        connection.client.register(DidChangeConfigurationNotification.type, {
+            section: 'vix'
+        });
     }
     if (hasWorkspaceFolderCapability) {
         connection.workspace.onDidChangeWorkspaceFolders(_event => {
             connection.console.log('Workspace folder change event received.');
         });
     }
+
+    refreshSettings().catch(error => {
+        connection.console.error(`Failed to load vix settings: ${String(error)}`);
+    });
+});
+
+connection.onDidChangeConfiguration(() => {
+    refreshSettings().then(() => {
+        if (!hasPullDiagnosticCapability) {
+            documents.all().forEach(validateTextDocument);
+        }
+    }).catch(error => {
+        connection.console.error(`Failed to refresh vix settings: ${String(error)}`);
+    });
 });
 
 // 监听文档内容变化，执行诊断
@@ -104,6 +151,7 @@ interface VixFunctionInfo {
     name: string;
     line: number;
     signature: string;
+    genericParams: string[];
     params: Array<{ name: string; type?: string }>;
     returnType?: string;
 }
@@ -124,6 +172,34 @@ interface VixSymbolIndex {
 const BUILTIN_TYPES = new Set(['i8', 'i16', 'i32', 'i64', 'u8', 'u16', 'u32', 'u64', 'f32', 'f64', 'string', 'char', 'bool', 'void']);
 const BUILTIN_FUNCTIONS = new Set(['print', 'input', 'strlen', 'substr', 'printf', 'read', 'wait', 'parse', 'toint', 'tofloat', 'tostring', 'length', 'add', 'remove']);
 const VIX_KEYWORDS = new Set(['if', 'while', 'for', 'return', 'extern', 'fn', 'mut', 'let', 'const', 'struct', 'obj', 'meth', 'field', 'impl', 'as', 'public', 'pub', 'elif', 'else', 'break', 'continue', 'in', 'import', 'true', 'false', 'and', 'or', 'char', 'type', 'match']);
+
+function parseGenericParams(genericText?: string): string[] {
+    if (!genericText) {
+        return [];
+    }
+
+    return genericText
+        .split(',')
+        .map(param => param.trim())
+        .filter(param => /^[a-zA-Z_][a-zA-Z0-9_]*$/.test(param));
+}
+
+function buildFunctionInsertSnippet(fnInfo: VixFunctionInfo): string {
+    const genericSnippet = fnInfo.genericParams.length > 0
+        ? `:[${fnInfo.genericParams.map((param, index) => `\${${index + 1}:${param}}`).join(', ')}]`
+        : '';
+
+    const paramSnippetStart = fnInfo.genericParams.length + 1;
+    const paramSnippet = fnInfo.params
+        .map((param, index) => `\${${paramSnippetStart + index}:${param.name}}`)
+        .join(', ');
+
+    if (paramSnippet.length === 0) {
+        return `${fnInfo.name}${genericSnippet}($0)`;
+    }
+
+    return `${fnInfo.name}${genericSnippet}(${paramSnippet})`;
+}
 
 function inferArrayLiteralInfo(expression: string, symbolIndex: VixSymbolIndex): { elementType: string; count: number } | undefined {
     const value = expression.trim();
@@ -298,23 +374,25 @@ function buildSymbolIndex(document: TextDocument): VixSymbolIndex {
         const maskedLine = maskLineForCode(line, maskState);
         maskedLines.push(maskedLine);
 
-        const fnRegex = /\bfn\s+([a-zA-Z_][a-zA-Z0-9_]*)(?:\s*:\s*\[[^\]]+\])?\s*\(([^)]*)\)\s*(?::\s*([a-zA-Z_][a-zA-Z0-9_\[\]\*]*)|->\s*([a-zA-Z_][a-zA-Z0-9_\[\]\*]*))?/g;
+        const fnRegex = /\bfn\s+([a-zA-Z_][a-zA-Z0-9_]*)(?:\s*:\s*\[([^\]]+)\])?\s*\(([^)]*)\)\s*(?::\s*([a-zA-Z_][a-zA-Z0-9_\[\]\*]*)|->\s*([a-zA-Z_][a-zA-Z0-9_\[\]\*]*))?/g;
         let fnMatch: RegExpExecArray | null;
         while ((fnMatch = fnRegex.exec(maskedLine)) !== null) {
             const fnName = fnMatch[1];
             const signature = lines[lineIndex].trim();
+            const genericParams = parseGenericParams(fnMatch[2]);
             const params: Array<{ name: string; type?: string }> = [];
             if (!functions.has(fnName)) {
                 functions.set(fnName, {
                     name: fnName,
                     line: lineIndex,
                     signature,
+                    genericParams,
                     params,
-                    returnType: fnMatch[3] || fnMatch[4]
+                    returnType: fnMatch[4] || fnMatch[5]
                 });
             }
 
-            const paramsText = fnMatch[2] || '';
+            const paramsText = fnMatch[3] || '';
             const paramRegex = /\b(?:mut\s+)?([a-zA-Z_][a-zA-Z0-9_]*)\s*:\s*([a-zA-Z_][a-zA-Z0-9_]*)?/g;
             let paramMatch: RegExpExecArray | null;
             while ((paramMatch = paramRegex.exec(paramsText)) !== null) {
@@ -332,6 +410,7 @@ function buildSymbolIndex(document: TextDocument): VixSymbolIndex {
 
             const existing = functions.get(fnName);
             if (existing) {
+                existing.genericParams = genericParams;
                 existing.params = params;
             }
         }
@@ -577,12 +656,12 @@ connection.onHover((params: HoverParams): Hover | null => {
     // 这里可以根据具体的Vix语言函数定义来返回相应信息
     // 为了演示，这里提供了一些示例函数的文档
     const functionDocs: { [key: string]: string } = {
-        'if': '条件语句: ```vix\nif (condition) { ... }\n```',
-        'while': '循环语句: ```vix\nwhile (condition) { ... }\n```',
-        'for': '循环语句: ```vix\nfor (init; condition; increment) { ... }\n```',
-        'print': '输出函数: ```vix\nprint(value) - 输出指定值到控制台\n```',
-        'input': '#输入函数: ```vix\ninput() - 从控制台读取用户输入\n```',
-        'import': '导入语句: ```vix\nimport module_name\n```\n用于导入模块。',
+        'if': t('条件语句: ```vix\nif (condition) { ... }\n```', 'Conditional statement: ```vix\nif (condition) { ... }\n```'),
+        'while': t('循环语句: ```vix\nwhile (condition) { ... }\n```', 'Loop statement: ```vix\nwhile (condition) { ... }\n```'),
+        'for': t('循环语句: ```vix\nfor (init; condition; increment) { ... }\n```', 'Loop statement: ```vix\nfor (init; condition; increment) { ... }\n```'),
+        'print': t('输出函数: ```vix\nprint(value) - 输出指定值到控制台\n```', 'Output function: ```vix\nprint(value) - Print value to console\n```'),
+        'input': t('#输入函数: ```vix\ninput() - 从控制台读取用户输入\n```', '#Input function: ```vix\ninput() - Read user input from console\n```'),
+        'import': t('导入语句: ```vix\nimport module_name\n```\n用于导入模块。', 'Import statement: ```vix\nimport module_name\n```\nUsed to import a module.'),
     };
 
     if (functionDocs[word]) {
@@ -604,7 +683,10 @@ connection.onHover((params: HoverParams): Hover | null => {
         return {
             contents: {
                 kind: 'markdown',
-                value: `### 函数 \`${word}\`\n\n\`\`\`vix\n${functionInfo.signature}\n\`\`\`\n\n- 定义位置: 第 ${functionInfo.line + 1} 行\n- 文档内引用次数: ${usageCount}`
+                value: t(
+                    `### 函数 \`${word}\`\n\n\`\`\`vix\n${functionInfo.signature}\n\`\`\`\n\n- 定义位置: 第 ${functionInfo.line + 1} 行\n- 文档内引用次数: ${usageCount}`,
+                    `### Function \`${word}\`\n\n\`\`\`vix\n${functionInfo.signature}\n\`\`\`\n\n- Defined at: line ${functionInfo.line + 1}\n- References in document: ${usageCount}`
+                )
             },
             range: {
                 start: { line: position.line, character: start },
@@ -616,11 +698,14 @@ connection.onHover((params: HoverParams): Hover | null => {
     const variableInfo = symbolIndex.variables.get(word);
     if (variableInfo) {
         const usageCount = countIdentifierUsages(symbolIndex.maskedLines, word);
-        const typeDisplay = variableInfo.type ? `\`${variableInfo.type}\`` : '未知';
+        const typeDisplay = variableInfo.type ? `\`${variableInfo.type}\`` : t('未知', 'unknown');
         return {
             contents: {
                 kind: 'markdown',
-                value: `### 变量 \`${word}\`\n\n- 类型: ${typeDisplay}\n- 定义位置: 第 ${variableInfo.line + 1} 行\n- 文档内引用次数: ${usageCount}`
+                value: t(
+                    `### 变量 \`${word}\`\n\n- 类型: ${typeDisplay}\n- 定义位置: 第 ${variableInfo.line + 1} 行\n- 文档内引用次数: ${usageCount}`,
+                    `### Variable \`${word}\`\n\n- Type: ${typeDisplay}\n- Defined at: line ${variableInfo.line + 1}\n- References in document: ${usageCount}`
+                )
             },
             range: {
                 start: { line: position.line, character: start },
@@ -637,7 +722,10 @@ connection.onHover((params: HoverParams): Hover | null => {
         return {
             contents: {
                 kind: 'markdown',
-                value: `### 结构体 \`${word}\`\n\n- 定义位置: 第 ${structInfo.line + 1} 行\n\n字段:\n${fieldText}`
+                value: t(
+                    `### 结构体 \`${word}\`\n\n- 定义位置: 第 ${structInfo.line + 1} 行\n\n字段:\n${fieldText}`,
+                    `### Struct \`${word}\`\n\n- Defined at: line ${structInfo.line + 1}\n\nFields:\n${fieldText}`
+                )
             },
             range: {
                 start: { line: position.line, character: start },
@@ -651,7 +739,7 @@ connection.onHover((params: HoverParams): Hover | null => {
         return {
             contents: {
                 kind: 'markdown',
-                value: `内置类型: \`${word}\``
+                value: t(`内置类型: \`${word}\``, `Builtin type: \`${word}\``)
             },
             range: {
                 start: { line: position.line, character: start },
@@ -664,7 +752,10 @@ connection.onHover((params: HoverParams): Hover | null => {
         return {
             contents: {
                 kind: 'markdown',
-                value: `符号 \`${word}\` 未定义。\n\n请先声明变量或定义函数。`
+                value: t(
+                    `符号 \`${word}\` 未定义。\n\n请先声明变量或定义函数。`,
+                    `Symbol \`${word}\` is undefined.\n\nPlease declare the variable or define the function first.`
+                )
             },
             range: {
                 start: { line: position.line, character: start },
@@ -737,7 +828,7 @@ function inferExpressionType(expression: string, symbolIndex: VixSymbolIndex): s
         return structLiteralMatch[1];
     }
 
-    const functionCallMatch = /^([a-zA-Z_][a-zA-Z0-9_]*)\s*\(/.exec(value);
+    const functionCallMatch = /^([a-zA-Z_][a-zA-Z0-9_]*)(?:\s*:\s*\[[^\]]+\])?\s*\(/.exec(value);
     if (functionCallMatch) {
         const fnInfo = symbolIndex.functions.get(functionCallMatch[1]);
         if (fnInfo?.returnType) {
@@ -775,7 +866,7 @@ connection.onRequest(InlayHintRequest.type, (params: InlayHintParams): InlayHint
     for (let lineIndex = startLine; lineIndex <= endLine && lineIndex < symbolIndex.maskedLines.length; lineIndex++) {
         const maskedLine = symbolIndex.maskedLines[lineIndex];
 
-        const callRegex = /\b([a-zA-Z_][a-zA-Z0-9_]*)\s*\(([^()]*)\)/g;
+        const callRegex = /\b([a-zA-Z_][a-zA-Z0-9_]*)(?:\s*:\s*\[[^\]]*\])?\s*\(([^()]*)\)/g;
         let callMatch: RegExpExecArray | null;
         while ((callMatch = callRegex.exec(maskedLine)) !== null) {
             if (isFunctionDeclarationInvocationLine(maskedLine, callMatch)) {
@@ -1066,7 +1157,10 @@ function validateTextDocumentForDiagnostic(textDocument: TextDocument): Diagnost
                             start: { line: lineIdx, character: colIdx },
                             end: { line: lineIdx, character: colIdx + 1 }
                         },
-                        message: `多余的${closingNameMap[char]}在第 ${lineIdx + 1} 行`,
+                        message: t(
+                            `多余的${closingNameMap[char]}在第 ${lineIdx + 1} 行`,
+                            `Unexpected '${char}' at line ${lineIdx + 1}`
+                        ),
                         source: 'vix'
                     });
                 } else {
@@ -1090,7 +1184,10 @@ function validateTextDocumentForDiagnostic(textDocument: TextDocument): Diagnost
                 start: { line: unmatched.line, character: unmatched.col },
                 end: { line: unmatched.line, character: unmatched.col + 1 }
             },
-            message: `未闭合的 ${unmatched.char} 在第 ${unmatched.line + 1} 行`,
+            message: t(
+                `未闭合的 ${unmatched.char} 在第 ${unmatched.line + 1} 行`,
+                `Unclosed '${unmatched.char}' at line ${unmatched.line + 1}`
+            ),
             source: 'vix'
         });
     }
@@ -1111,7 +1208,7 @@ function validateTextDocumentForDiagnostic(textDocument: TextDocument): Diagnost
                         start: { line: i, character: 0 },
                         end: { line: i, character: line.length }
                     },
-                    message: `未闭合的字符串在第 ${i + 1} 行`,
+                    message: t(`未闭合的字符串在第 ${i + 1} 行`, `Unclosed string at line ${i + 1}`),
                     source: 'vix'
                 });
             }
@@ -1125,7 +1222,7 @@ function validateTextDocumentForDiagnostic(textDocument: TextDocument): Diagnost
                         start: { line: i, character: 0 },
                         end: { line: i, character: line.length }
                     },
-                    message: `未闭合的字符在第 ${i + 1} 行`,
+                    message: t(`未闭合的字符在第 ${i + 1} 行`, `Unclosed char literal at line ${i + 1}`),
                     source: 'vix'
                 });
             }
@@ -1172,7 +1269,10 @@ function validateTextDocumentForDiagnostic(textDocument: TextDocument): Diagnost
                         start: { line: i, character: startPos },
                         end: { line: i, character: startPos + token.length }
                     },
-                    message: `标识符不能以数字开头: "${token}"`,
+                    message: t(
+                        `标识符不能以数字开头: "${token}"`,
+                        `Identifier cannot start with a number: "${token}"`
+                    ),
                     source: 'vix'
                 };
                 pushUniqueDiagnostic(diagnostic);
@@ -1195,7 +1295,7 @@ function validateTextDocumentForDiagnostic(textDocument: TextDocument): Diagnost
                         start: { line: i, character: varMatch.index },
                         end: { line: i, character: varMatch.index + varMatch[0].length }
                     },
-                    message: `变量 "${varName}" 已经被声明`,
+                    message: t(`变量 "${varName}" 已经被声明`, `Variable "${varName}" is already declared`),
                     source: 'vix'
                 };
                 pushUniqueDiagnostic(diagnostic);
@@ -1249,7 +1349,11 @@ function extractSymbolsFromDocument(document: TextDocument) {
         symbols.push({
             label: fnInfo.name,
             kind: CompletionItemKind.Function,
-            detail: `函数 ${fnInfo.name}`
+            detail: fnInfo.genericParams.length > 0
+                ? t(`泛型函数 ${fnInfo.name}:[${fnInfo.genericParams.join(', ')}]`, `Generic function ${fnInfo.name}:[${fnInfo.genericParams.join(', ')}]`)
+                : t(`函数 ${fnInfo.name}`, `Function ${fnInfo.name}`),
+            insertText: buildFunctionInsertSnippet(fnInfo),
+            insertTextFormat: InsertTextFormat.Snippet
         });
     }
 
@@ -1257,7 +1361,9 @@ function extractSymbolsFromDocument(document: TextDocument) {
         symbols.push({
             label: variableInfo.name,
             kind: CompletionItemKind.Variable,
-            detail: variableInfo.type ? `变量 ${variableInfo.name}: ${variableInfo.type}` : `变量 ${variableInfo.name}`
+            detail: variableInfo.type
+                ? t(`变量 ${variableInfo.name}: ${variableInfo.type}`, `Variable ${variableInfo.name}: ${variableInfo.type}`)
+                : t(`变量 ${variableInfo.name}`, `Variable ${variableInfo.name}`)
         });
     }
 
@@ -1265,7 +1371,7 @@ function extractSymbolsFromDocument(document: TextDocument) {
         symbols.push({
             label: structInfo.name,
             kind: CompletionItemKind.Class,
-            detail: `结构体 ${structInfo.name}`
+            detail: t(`结构体 ${structInfo.name}`, `Struct ${structInfo.name}`)
         });
     }
     
@@ -1300,59 +1406,59 @@ connection.onCompletion(
                 {
                     label: 'extern',
                     kind: CompletionItemKind.Keyword,
-                    detail: '外部链接声明'
+                    detail: t('外部链接声明', 'External linkage declaration')
                 },
                 {
                     label: 'if',
                     kind: CompletionItemKind.Keyword,
-                    detail: '条件语句'
+                    detail: t('条件语句', 'Conditional statement')
                 },
                 {
                     label: 'while',
                     kind: CompletionItemKind.Keyword,
-                    detail: '循环语句'
+                    detail: t('循环语句', 'Loop statement')
                 },
                 {
                     label: 'for',
                     kind: CompletionItemKind.Keyword,
-                    detail: '循环语句'
+                    detail: t('循环语句', 'Loop statement')
                 },
                 {
                     label: 'fn',
                     kind: CompletionItemKind.Keyword,
-                    detail: '函数定义'
+                    detail: t('函数定义', 'Function definition')
                 },
                 {
                     label: 'struct',
                     kind: CompletionItemKind.Keyword,
-                    detail: '结构体定义'
+                    detail: t('结构体定义', 'Struct definition')
                 },
                 {
                     label: 'mut',
                     kind: CompletionItemKind.Keyword,
-                    detail: '可变变量声明'
+                    detail: t('可变变量声明', 'Mutable variable declaration')
                 },
                 {
                     label: 'let',
                     kind: CompletionItemKind.Keyword,
-                    detail: '变量声明 (let)'
+                    detail: t('变量声明 (let)', 'Variable declaration (let)')
                 },
                 {
                     label: 'return',
                     kind: CompletionItemKind.Keyword,
-                    detail: '返回语句'
+                    detail: t('返回语句', 'Return statement')
                 },
                 {
                     label: 'type',
                     kind: CompletionItemKind.Keyword,
-                    detail: '类型别名定义',
+                    detail: t('类型别名定义', 'Type alias definition'),
                     insertText: 'type ${1:Name} = ${2:Variant1} | ${3:Variant2}',
                     insertTextFormat: InsertTextFormat.Snippet
                 },
                 {
                     label: 'match',
                     kind: CompletionItemKind.Keyword,
-                    detail: '模式匹配语句',
+                    detail: t('模式匹配语句', 'Pattern matching statement'),
                     insertText: 'match ${1:value} {\n\t${2:Case1} -> {\n\t\t${3}\n\t},\n\t_ -> {\n\t\t$0\n\t}\n}',
                     insertTextFormat: InsertTextFormat.Snippet
                 }
@@ -1363,12 +1469,12 @@ connection.onCompletion(
                 {
                     label: 'property1',
                     kind: CompletionItemKind.Field,
-                    detail: '示例属性1'
+                    detail: t('示例属性1', 'Example property 1')
                 },
                 {
                     label: 'method1()',
                     kind: CompletionItemKind.Method,
-                    detail: '示例方法1'
+                    detail: t('示例方法1', 'Example method 1')
                 }
             ];
         } else {
@@ -1377,37 +1483,37 @@ connection.onCompletion(
             
             // 检查是否是关键字补全
             const keywords = [
-                { label: 'extern', kind: CompletionItemKind.Keyword, detail: '外部链接声明' },
-                { label: 'if', kind: CompletionItemKind.Keyword, detail: '条件语句' },
-                { label: 'while', kind: CompletionItemKind.Keyword, detail: '循环语句' },
-                { label: 'for', kind: CompletionItemKind.Keyword, detail: '循环语句' },
-                { label: 'fn', kind: CompletionItemKind.Keyword, detail: '函数定义' },
-                { label: 'struct', kind: CompletionItemKind.Keyword, detail: '结构体定义' },
-                { label: 'mut', kind: CompletionItemKind.Keyword, detail: '可变变量声明' },
-                { label: 'let', kind: CompletionItemKind.Keyword, detail: '变量声明 (let)' },
-                { label: 'return', kind: CompletionItemKind.Keyword, detail: '返回语句' },
-                { label: 'else', kind: CompletionItemKind.Keyword, detail: '条件分支' },
-                { label: 'elif', kind: CompletionItemKind.Keyword, detail: '条件分支' },
-                { label: 'true', kind: CompletionItemKind.Value, detail: '布尔值' },
-                { label: 'false', kind: CompletionItemKind.Value, detail: '布尔值' },
-                { label: 'obj', kind: CompletionItemKind.Keyword, detail: '对象定义' },
-                { label: 'impl', kind: CompletionItemKind.Keyword, detail: '实现块' },
-                { label: 'as', kind: CompletionItemKind.Keyword, detail: '类型转换' },
-                { label: 'public', kind: CompletionItemKind.Keyword, detail: '公共访问修饰符' },
-                { label: 'in', kind: CompletionItemKind.Keyword, detail: '循环中的成员操作符' },
-                { label: 'break', kind: CompletionItemKind.Keyword, detail: '跳出循环' },
-                { label: 'continue', kind: CompletionItemKind.Keyword, detail: '继续下一次循环' },
+                { label: 'extern', kind: CompletionItemKind.Keyword, detail: t('外部链接声明', 'External linkage declaration') },
+                { label: 'if', kind: CompletionItemKind.Keyword, detail: t('条件语句', 'Conditional statement') },
+                { label: 'while', kind: CompletionItemKind.Keyword, detail: t('循环语句', 'Loop statement') },
+                { label: 'for', kind: CompletionItemKind.Keyword, detail: t('循环语句', 'Loop statement') },
+                { label: 'fn', kind: CompletionItemKind.Keyword, detail: t('函数定义', 'Function definition') },
+                { label: 'struct', kind: CompletionItemKind.Keyword, detail: t('结构体定义', 'Struct definition') },
+                { label: 'mut', kind: CompletionItemKind.Keyword, detail: t('可变变量声明', 'Mutable variable declaration') },
+                { label: 'let', kind: CompletionItemKind.Keyword, detail: t('变量声明 (let)', 'Variable declaration (let)') },
+                { label: 'return', kind: CompletionItemKind.Keyword, detail: t('返回语句', 'Return statement') },
+                { label: 'else', kind: CompletionItemKind.Keyword, detail: t('条件分支', 'Conditional branch') },
+                { label: 'elif', kind: CompletionItemKind.Keyword, detail: t('条件分支', 'Conditional branch') },
+                { label: 'true', kind: CompletionItemKind.Value, detail: t('布尔值', 'Boolean value') },
+                { label: 'false', kind: CompletionItemKind.Value, detail: t('布尔值', 'Boolean value') },
+                { label: 'obj', kind: CompletionItemKind.Keyword, detail: t('对象定义', 'Object definition') },
+                { label: 'impl', kind: CompletionItemKind.Keyword, detail: t('实现块', 'Implementation block') },
+                { label: 'as', kind: CompletionItemKind.Keyword, detail: t('类型转换', 'Type conversion') },
+                { label: 'public', kind: CompletionItemKind.Keyword, detail: t('公共访问修饰符', 'Public access modifier') },
+                { label: 'in', kind: CompletionItemKind.Keyword, detail: t('循环中的成员操作符', 'Member operator in loop') },
+                { label: 'break', kind: CompletionItemKind.Keyword, detail: t('跳出循环', 'Break loop') },
+                { label: 'continue', kind: CompletionItemKind.Keyword, detail: t('继续下一次循环', 'Continue next iteration') },
                 {
                     label: 'type',
                     kind: CompletionItemKind.Keyword,
-                    detail: '类型别名定义',
+                    detail: t('类型别名定义', 'Type alias definition'),
                     insertText: 'type ${1:Name} = ${2:Variant1} | ${3:Variant2}',
                     insertTextFormat: InsertTextFormat.Snippet
                 },
                 {
                     label: 'match',
                     kind: CompletionItemKind.Keyword,
-                    detail: '模式匹配语句',
+                    detail: t('模式匹配语句', 'Pattern matching statement'),
                     insertText: 'match ${1:value} {\n\t${2:Case1} -> {\n\t\t${3}\n\t},\n\t_ -> {\n\t\t$0\n\t}\n}',
                     insertTextFormat: InsertTextFormat.Snippet
                 }
@@ -1415,20 +1521,20 @@ connection.onCompletion(
             
             // 类型补全
             const types = [
-                { label: 'i8', kind: CompletionItemKind.TypeParameter, detail: '8位有符号整数' },
-                { label: 'i16', kind: CompletionItemKind.TypeParameter, detail: '16位有符号整数' },
-                { label: 'i32', kind: CompletionItemKind.TypeParameter, detail: '32位有符号整数' },
-                { label: 'i64', kind: CompletionItemKind.TypeParameter, detail: '64位有符号整数' },
-                { label: 'u8', kind: CompletionItemKind.TypeParameter, detail: '8位无符号整数' },
-                { label: 'u16', kind: CompletionItemKind.TypeParameter, detail: '16位无符号整数' },
-                { label: 'u32', kind: CompletionItemKind.TypeParameter, detail: '32位无符号整数' },
-                { label: 'u64', kind: CompletionItemKind.TypeParameter, detail: '64位无符号整数' },
-                { label: 'f32', kind: CompletionItemKind.TypeParameter, detail: '32位浮点数' },
-                { label: 'f64', kind: CompletionItemKind.TypeParameter, detail: '64位浮点数' },
-                { label: 'string', kind: CompletionItemKind.TypeParameter, detail: '字符串类型' },
-                { label: 'char', kind: CompletionItemKind.TypeParameter, detail: '字符类型' },
-                { label: 'bool', kind: CompletionItemKind.TypeParameter, detail: '布尔类型' },
-                { label: 'void', kind: CompletionItemKind.TypeParameter, detail: '空类型' }
+                { label: 'i8', kind: CompletionItemKind.TypeParameter, detail: t('8位有符号整数', '8-bit signed integer') },
+                { label: 'i16', kind: CompletionItemKind.TypeParameter, detail: t('16位有符号整数', '16-bit signed integer') },
+                { label: 'i32', kind: CompletionItemKind.TypeParameter, detail: t('32位有符号整数', '32-bit signed integer') },
+                { label: 'i64', kind: CompletionItemKind.TypeParameter, detail: t('64位有符号整数', '64-bit signed integer') },
+                { label: 'u8', kind: CompletionItemKind.TypeParameter, detail: t('8位无符号整数', '8-bit unsigned integer') },
+                { label: 'u16', kind: CompletionItemKind.TypeParameter, detail: t('16位无符号整数', '16-bit unsigned integer') },
+                { label: 'u32', kind: CompletionItemKind.TypeParameter, detail: t('32位无符号整数', '32-bit unsigned integer') },
+                { label: 'u64', kind: CompletionItemKind.TypeParameter, detail: t('64位无符号整数', '64-bit unsigned integer') },
+                { label: 'f32', kind: CompletionItemKind.TypeParameter, detail: t('32位浮点数', '32-bit floating point') },
+                { label: 'f64', kind: CompletionItemKind.TypeParameter, detail: t('64位浮点数', '64-bit floating point') },
+                { label: 'string', kind: CompletionItemKind.TypeParameter, detail: t('字符串类型', 'String type') },
+                { label: 'char', kind: CompletionItemKind.TypeParameter, detail: t('字符类型', 'Char type') },
+                { label: 'bool', kind: CompletionItemKind.TypeParameter, detail: t('布尔类型', 'Boolean type') },
+                { label: 'void', kind: CompletionItemKind.TypeParameter, detail: t('空类型', 'Void type') }
             ];
             
             // 预定义函数补全
@@ -1436,28 +1542,28 @@ connection.onCompletion(
                 {
                     label: 'print',
                     kind: CompletionItemKind.Function, // Function
-                    detail: '输出函数',
+                    detail: t('输出函数', 'Output function'),
                     insertText: 'print(${1:value})',
                     insertTextFormat: InsertTextFormat.Snippet
                 },
                 {
                     label: 'input',
                     kind: CompletionItemKind.Function, // Function
-                    detail: '输入函数',
+                    detail: t('输入函数', 'Input function'),
                     insertText: 'input()',
                     insertTextFormat: InsertTextFormat.Snippet
                 },
                 {
                     label: 'strlen',
                     kind: CompletionItemKind.Function, // Function
-                    detail: '字符串长度函数',
+                    detail: t('字符串长度函数', 'String length function'),
                     insertText: 'strlen(${1:str})',
                     insertTextFormat: InsertTextFormat.Snippet
                 },
                 {
                     label: 'substr',
                     kind: CompletionItemKind.Function, // Function
-                    detail: '子字符串函数',
+                    detail: t('子字符串函数', 'Substring function'),
                     insertText: 'substr(${1:str}, ${2:start}, ${3:length})',
                     insertTextFormat: InsertTextFormat.Snippet
                 }
@@ -1478,7 +1584,7 @@ connection.onCompletion(
 
 // 监听连接关闭事件
 connection.onDidChangeWatchedFiles(_change => {
-    connection.console.log('我们监视的文件已更改');
+    connection.console.log(t('我们监视的文件已更改', 'Watched files have changed'));
 });
 
 // 监听文档同步请求

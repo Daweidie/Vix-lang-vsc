@@ -241,7 +241,7 @@
           ]
         },
         {
-          "begin": "\\b(fn)\\s+([a-zA-Z_][a-zA-Z0-9_]*)\\s*(\\([^)]*\\))?(?:\\s*(->)\\s*([a-zA-Z_][a-zA-Z0-9_]*))?",
+          "begin": "\\b(fn)\\s+([a-zA-Z_][a-zA-Z0-9_]*)(\\s*:\\s*\\[[^\\]]+\\])?\\s*(\\([^)]*\\))?(?:\\s*(:|->)\\s*([a-zA-Z_][a-zA-Z0-9_]*))?",
           "beginCaptures": {
             "1": {
               "name": "storage.type.function.vix keyword.declaration.vix"
@@ -250,12 +250,15 @@
               "name": "entity.name.function.vix support.function.vix"
             },
             "3": {
-              "name": "meta.brace.round.vix"
+              "name": "meta.generic.arguments.vix"
             },
             "4": {
-              "name": "keyword.operator.arrow.vix"
+              "name": "meta.brace.round.vix"
             },
             "5": {
+              "name": "keyword.operator.arrow.vix"
+            },
+            "6": {
               "name": "storage.type.vix"
             }
           },
@@ -272,6 +275,40 @@
           ]
         },
         {
+          "begin": "\\b([a-zA-Z_][a-zA-Z0-9_]*)(\\s*:\\s*)(\\[)",
+          "beginCaptures": {
+            "1": {
+              "name": "entity.name.function.vix"
+            },
+            "2": {
+              "name": "punctuation.separator.vix"
+            },
+            "3": {
+              "name": "meta.brace.square.vix"
+            }
+          },
+          "end": "(\\])(?=\\s*\\()",
+          "endCaptures": {
+            "1": {
+              "name": "meta.brace.square.vix"
+            }
+          },
+          "name": "meta.generic.arguments.vix",
+          "patterns": [
+            {
+              "match": "\\b([A-Z][a-zA-Z0-9_]*)\\b",
+              "name": "entity.name.type.parameter.vix"
+            },
+            {
+              "include": "#types"
+            },
+            {
+              "match": ",",
+              "name": "punctuation.separator.comma.vix"
+            }
+          ]
+        },
+        {
           "match": "([a-zA-Z_][a-zA-Z0-9_]*)\\s*(?=\\()",
           "name": "entity.name.function.vix"
         }
@@ -280,7 +317,7 @@
     "extern-functions": {
       "patterns": [
         {
-          "match": "\\b(fn)\\s+([a-zA-Z_][a-zA-Z0-9_]*)\\s*\\([^)]*\\)(?:\\s*(->)\\s*([a-zA-Z_][a-zA-Z0-9_]*))?",
+          "match": "\\b(fn)\\s+([a-zA-Z_][a-zA-Z0-9_]*)(?:\\s*:\\s*\\[[^\\]]+\\])?\\s*\\([^)]*\\)(?:\\s*(:|->)\\s*([a-zA-Z_][a-zA-Z0-9_]*))?",
           "captures": {
             "1": {
               "name": "storage.type.function.vix keyword.declaration.vix"

@@ -1,0 +1,14 @@
+fn foo:[T,U](a:T, b:U): T
+{
+    return a
+}
+fn main(): i32
+{
+    let x = foo(1, "hello")
+    bar(1)
+    return 0
+}
+fn bar:[T](a:T): T
+{
+    return a
+}

@@ -27,7 +27,21 @@
       "language": "vix",
       "scopeName": "source.vix",
       "path": "./syntaxes/vix.json"
-    }]
+    }],
+    "configuration": {
+      "title": "Vix",
+      "properties": {
+        "vix.language": {
+          "type": "string",
+          "enum": [
+            "zh-cn",
+            "en"
+          ],
+          "default": "zh-cn",
+          "description": "Language for Vix hover/completion/diagnostic prompts (zh-cn or en)."
+        }
+      }
+    }
   },
   "scripts": {
     "vscode:prepublish": "npm run compile",
