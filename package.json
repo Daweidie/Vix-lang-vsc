@@ -10,6 +10,9 @@
   "categories": [
     "Programming Languages"
   ],
+  "activationEvents": [
+    "onLanguage:vix"
+  ],
   "main": "./out/extension.js",
   "icon": "images/logo.png",
   "contributes": {

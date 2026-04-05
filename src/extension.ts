@@ -37,7 +37,7 @@ export async function activate(context: ExtensionContext) {
         }],
         synchronize: {
             // 监视配置文件的变化
-            fileEvents: workspace.createFileSystemWatcher('**/.vix')
+            fileEvents: workspace.createFileSystemWatcher('**/*.vix')
         }
     };
     

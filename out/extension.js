@@ -53,7 +53,7 @@ async function activate(context) {
             }],
         synchronize: {
             // 监视配置文件的变化
-            fileEvents: vscode_1.workspace.createFileSystemWatcher('**/.vix')
+            fileEvents: vscode_1.workspace.createFileSystemWatcher('**/*.vix')
         }
     };
     // 创建语言客户端
