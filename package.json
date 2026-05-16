@@ -31,6 +31,58 @@
       "scopeName": "source.vix",
       "path": "./syntaxes/vix.json"
     }],
+    "commands": [{
+      "command": "vix.compile",
+      "title": "Compile Vix",
+      "icon": "$(play)"
+    }, {
+      "command": "vix.showCompilerOutput",
+      "title": "Vix: Show Compiler Output",
+      "icon": "$(output)"
+    }, {
+      "command": "vix.compile.l0",
+      "title": "Compile Vix (l0)"
+    }, {
+      "command": "vix.compile.l1",
+      "title": "Compile Vix (l1)"
+    }, {
+      "command": "vix.compile.l2",
+      "title": "Compile Vix (l2)"
+    }, {
+      "command": "vix.compile.l3",
+      "title": "Compile Vix (l3)"
+    }, {
+      "command": "vix.compile.asm.l0",
+      "title": "Compile Vix to Assembly (l0)"
+    }, {
+      "command": "vix.compile.asm.l1",
+      "title": "Compile Vix to Assembly (l1)"
+    }, {
+      "command": "vix.compile.asm.l2",
+      "title": "Compile Vix to Assembly (l2)"
+    }, {
+      "command": "vix.compile.asm.l3",
+      "title": "Compile Vix to Assembly (l3)"
+    }, {
+      "command": "vix.compile.obj.l0",
+      "title": "Compile Vix to Object File (l0)"
+    }, {
+      "command": "vix.compile.obj.l1",
+      "title": "Compile Vix to Object File (l1)"
+    }, {
+      "command": "vix.compile.obj.l2",
+      "title": "Compile Vix to Object File (l2)"
+    }, {
+      "command": "vix.compile.obj.l3",
+      "title": "Compile Vix to Object File (l3)"
+    }],
+    "menus": {
+      "editor/title": [{
+        "command": "vix.compile",
+        "when": "resourceLangId == vix",
+        "group": "navigation"
+      }]
+    },
     "configuration": {
       "title": "Vix",
       "properties": {
@@ -42,6 +94,11 @@
           ],
           "default": "zh-cn",
           "description": "Language for Vix hover/completion/diagnostic prompts (zh-cn or en)."
+        },
+        "vix.compilerPath": {
+          "type": "string",
+          "default": "vixc",
+          "description": "Path to the vixc compiler executable."
         }
       }
     }

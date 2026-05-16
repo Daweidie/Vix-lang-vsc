@@ -15,7 +15,7 @@ import {
     DocumentDiagnosticParams,
     RelatedFullDocumentDiagnosticReport,
     FullDocumentDiagnosticReport,
-    DocumentDiagnosticRequest,  // 导入文档诊断请求
+    DocumentDiagnosticRequest,
     InlayHint,
     InlayHintKind,
     InlayHintParams,
@@ -26,7 +26,14 @@ import {
     InsertTextFormat,
     DocumentSymbol,
     DocumentSymbolParams,
-    SymbolKind
+    SymbolKind,
+    Location,
+    ReferenceParams,
+    DocumentHighlight,
+    DocumentHighlightKind,
+    RenameParams,
+    TextEdit,
+    Position
 } from 'vscode-languageserver/node';
 import { TextDocument } from 'vscode-languageserver-textdocument';
 
@@ -97,7 +104,7 @@ connection.onInitialize((params: InitializeParams) => {
             completionProvider: {
                 triggerCharacters: ['.', ':']
             },
-            // 添加诊断提供者以支持实时错误检测
+            // 只保留 pull diagnostics（Problems面板），不主动推送编辑器下划线
             diagnosticProvider: {
                 documentSelector: [{ scheme: 'file', language: 'vix' }],
                 interFileDependencies: false,
@@ -106,7 +113,15 @@ connection.onInitialize((params: InitializeParams) => {
             // 添加 hover 功能
             hoverProvider: true,
             inlayHintProvider: true,
-            documentSymbolProvider: true
+            documentSymbolProvider: true,
+            // Go to Definition
+            definitionProvider: true,
+            // Find References
+            referencesProvider: true,
+            // Document Highlights
+            documentHighlightProvider: true,
+            // Rename
+            renameProvider: true
         }
     };
     
@@ -454,7 +469,7 @@ function buildSymbolIndex(document: TextDocument): VixSymbolIndex {
             }
         }
 
-        const declRegex = /\b(?:var|let|const|mut)\s+([a-zA-Z_][a-zA-Z0-9_]*)(?:\s*:\s*([a-zA-Z_][a-zA-Z0-9_\[\]\*\s]+))?/g;
+        const declRegex = /\b(?:var|let|const)\s+(?:mut\s+)?([a-zA-Z_][a-zA-Z0-9_]*)(?:\s*:\s*([a-zA-Z_][a-zA-Z0-9_\[\]\*\s]+))?/g;
         let declMatch: RegExpExecArray | null;
         while ((declMatch = declRegex.exec(maskedLine)) !== null) {
             const name = declMatch[1];
@@ -591,7 +606,7 @@ function isDeclarationAt(maskedLine: string, identifier: string, startIndex: num
     const escaped = identifier.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     const patterns = [
         new RegExp(`\\bfn\\s+${escaped}\\b`),
-        new RegExp(`\\b(?:var|let|const|mut)\\s+${escaped}\\b`),
+        new RegExp(`\\b(?:var|let|const)\\s+(?:mut\\s+)?${escaped}\\b`),
         new RegExp(`\\b${escaped}\\s*:\\s*[a-zA-Z_][a-zA-Z0-9_]*\\s*=`)
     ];
 
@@ -776,6 +791,209 @@ connection.onDocumentSymbol((params: DocumentSymbolParams): DocumentSymbol[] => 
     return buildDocumentSymbols(document);
 });
 
+// Go to Definition
+connection.onDefinition((params: TextDocumentPositionParams): Location | null => {
+    const document = documents.get(params.textDocument.uri);
+    if (!document) {
+        return null;
+    }
+
+    const lines = document.getText().split('\n');
+    const line = lines[params.position.line];
+    if (!line) {
+        return null;
+    }
+
+    const wordRange = getWordRangeAtPosition(line, params.position.character);
+    if (!wordRange) {
+        return null;
+    }
+
+    const { word } = wordRange;
+    const symbolIndex = buildSymbolIndex(document);
+
+    const fnInfo = symbolIndex.functions.get(word);
+    if (fnInfo) {
+        const defLine = lines[fnInfo.line] ?? '';
+        const charStart = defLine.indexOf(word);
+        return {
+            uri: params.textDocument.uri,
+            range: {
+                start: { line: fnInfo.line, character: Math.max(0, charStart) },
+                end: { line: fnInfo.line, character: Math.max(0, charStart) + word.length }
+            }
+        };
+    }
+
+    const varInfo = symbolIndex.variables.get(word);
+    if (varInfo) {
+        const defLine = lines[varInfo.line] ?? '';
+        const charStart = defLine.indexOf(word);
+        return {
+            uri: params.textDocument.uri,
+            range: {
+                start: { line: varInfo.line, character: Math.max(0, charStart) },
+                end: { line: varInfo.line, character: Math.max(0, charStart) + word.length }
+            }
+        };
+    }
+
+    const structInfo = symbolIndex.structs.get(word);
+    if (structInfo) {
+        const defLine = lines[structInfo.line] ?? '';
+        const charStart = defLine.indexOf(word);
+        return {
+            uri: params.textDocument.uri,
+            range: {
+                start: { line: structInfo.line, character: Math.max(0, charStart) },
+                end: { line: structInfo.line, character: Math.max(0, charStart) + word.length }
+            }
+        };
+    }
+
+    return null;
+});
+
+// Find References
+connection.onReferences((params: ReferenceParams): Location[] => {
+    const document = documents.get(params.textDocument.uri);
+    if (!document) {
+        return [];
+    }
+
+    const lines = document.getText().split('\n');
+    const line = lines[params.position.line];
+    if (!line) {
+        return [];
+    }
+
+    const wordRange = getWordRangeAtPosition(line, params.position.character);
+    if (!wordRange) {
+        return [];
+    }
+
+    const { word } = wordRange;
+    if (VIX_KEYWORDS.has(word) || BUILTIN_TYPES.has(word) || BUILTIN_FUNCTIONS.has(word)) {
+        return [];
+    }
+
+    const symbolIndex = buildSymbolIndex(document);
+    const locations: Location[] = [];
+    const regex = new RegExp(`\\b${word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'g');
+
+    for (let lineIdx = 0; lineIdx < symbolIndex.maskedLines.length; lineIdx++) {
+        const maskedLine = symbolIndex.maskedLines[lineIdx];
+        let match: RegExpExecArray | null;
+        while ((match = regex.exec(maskedLine)) !== null) {
+            locations.push({
+                uri: params.textDocument.uri,
+                range: {
+                    start: { line: lineIdx, character: match.index },
+                    end: { line: lineIdx, character: match.index + word.length }
+                }
+            });
+        }
+    }
+
+    return locations;
+});
+
+// Document Highlights
+connection.onDocumentHighlight((params: TextDocumentPositionParams): DocumentHighlight[] => {
+    const document = documents.get(params.textDocument.uri);
+    if (!document) {
+        return [];
+    }
+
+    const lines = document.getText().split('\n');
+    const line = lines[params.position.line];
+    if (!line) {
+        return [];
+    }
+
+    const wordRange = getWordRangeAtPosition(line, params.position.character);
+    if (!wordRange) {
+        return [];
+    }
+
+    const { word } = wordRange;
+    if (VIX_KEYWORDS.has(word) || BUILTIN_TYPES.has(word)) {
+        return [];
+    }
+
+    const symbolIndex = buildSymbolIndex(document);
+    const highlights: DocumentHighlight[] = [];
+    const regex = new RegExp(`\\b${word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'g');
+
+    for (let lineIdx = 0; lineIdx < symbolIndex.maskedLines.length; lineIdx++) {
+        const maskedLine = symbolIndex.maskedLines[lineIdx];
+        let match: RegExpExecArray | null;
+        while ((match = regex.exec(maskedLine)) !== null) {
+            const isWrite = isDeclarationAt(maskedLine, word, match.index);
+            highlights.push({
+                range: {
+                    start: { line: lineIdx, character: match.index },
+                    end: { line: lineIdx, character: match.index + word.length }
+                },
+                kind: isWrite ? DocumentHighlightKind.Write : DocumentHighlightKind.Read
+            });
+        }
+    }
+
+    return highlights;
+});
+
+// Rename
+connection.onRenameRequest((params: RenameParams): { changes: { [uri: string]: TextEdit[] } } | null => {
+    const document = documents.get(params.textDocument.uri);
+    if (!document) {
+        return null;
+    }
+
+    const lines = document.getText().split('\n');
+    const line = lines[params.position.line];
+    if (!line) {
+        return null;
+    }
+
+    const wordRange = getWordRangeAtPosition(line, params.position.character);
+    if (!wordRange) {
+        return null;
+    }
+
+    const { word } = wordRange;
+    const newName = params.newName;
+
+    if (VIX_KEYWORDS.has(word) || BUILTIN_TYPES.has(word) || BUILTIN_FUNCTIONS.has(word)) {
+        return null;
+    }
+
+    // Validate new name
+    if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(newName)) {
+        return null;
+    }
+
+    const symbolIndex = buildSymbolIndex(document);
+    const edits: TextEdit[] = [];
+    const regex = new RegExp(`\\b${word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'g');
+
+    for (let lineIdx = 0; lineIdx < symbolIndex.maskedLines.length; lineIdx++) {
+        const maskedLine = symbolIndex.maskedLines[lineIdx];
+        let match: RegExpExecArray | null;
+        while ((match = regex.exec(maskedLine)) !== null) {
+            edits.push({
+                range: {
+                    start: { line: lineIdx, character: match.index },
+                    end: { line: lineIdx, character: match.index + word.length }
+                },
+                newText: newName
+            });
+        }
+    }
+
+    return { changes: { [params.textDocument.uri]: edits } };
+});
+
 // 实现文档诊断请求处理器
 connection.onRequest(DocumentDiagnosticRequest.type, (params: DocumentDiagnosticParams) => {
     const document = documents.get(params.textDocument.uri);
@@ -898,7 +1116,7 @@ connection.onRequest(InlayHintRequest.type, (params: InlayHintParams): InlayHint
             }
         }
 
-        const assignmentRegex = /\b(?:(?:var|let|const|mut)\s+)?([a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*([^;]+)/g;
+        const assignmentRegex = /\b(?:(?:(?:var|let|const)\s+)?(?:mut\s+)?)?([a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*([^;]+)/g;
         let assignMatch: RegExpExecArray | null;
         while ((assignMatch = assignmentRegex.exec(maskedLine)) !== null) {
             const variableName = assignMatch[1];
@@ -985,14 +1203,8 @@ connection.onRequest(InlayHintRequest.type, (params: InlayHintParams): InlayHint
 
 // 验证文档内容并发送诊断信息
 function validateTextDocument(textDocument: TextDocument): void {
-    if (hasPullDiagnosticCapability) {
-        return;
-    }
-
-    const diagnostics = validateTextDocumentForDiagnostic(textDocument);
-
-    // 发布诊断信息到客户端
-    connection.sendDiagnostics({ uri: textDocument.uri, diagnostics });
+    // 不主动推送诊断（publishDiagnostics），只依赖 pull diagnostics（diagnosticProvider）
+    // 这样诊断只出现在 Problems 面板，不会在编辑器中产生下划线
 }
 
 function scanQuoteState(line: string): { hasUnclosedDouble: boolean; hasUnclosedSingle: boolean } {
@@ -1280,7 +1492,7 @@ function validateTextDocumentForDiagnostic(textDocument: TextDocument): Diagnost
         }
         
         // 检查重复的变量声明（按函数作用域隔离）
-        const varDeclarationPattern = /\b(var|let|const|mut)\s+([a-zA-Z_][a-zA-Z0-9_]*)\b/g;
+        const varDeclarationPattern = /\b(var|let|const)\s+(?:mut\s+)?([a-zA-Z_][a-zA-Z0-9_]*)\b/g;
         let varMatch: RegExpExecArray | null;
         while ((varMatch = varDeclarationPattern.exec(maskedLine)) !== null) {
             const varName = varMatch[2];
