@@ -630,7 +630,7 @@ function endsWithArrow(text: string): boolean {
 }
 
 function isFunctionDeclarationInvocationLine(maskedLine: string, callMatch: RegExpExecArray): boolean {
-    const declarationMatch = /^\s*fn\s+([a-zA-Z_][a-zA-Z0-9_]*)(?:\s*:\s*\[[^\]]+\])?\s*\(/.exec(maskedLine);
+    const declarationMatch = /^\s*(?:pub\s+)?fn\s+([a-zA-Z_][a-zA-Z0-9_]*)(?:\s*:\s*\[[^\]]+\])?\s*\(/.exec(maskedLine);
     if (!declarationMatch) {
         return false;
     }
