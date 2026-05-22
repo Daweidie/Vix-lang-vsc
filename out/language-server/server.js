@@ -483,7 +483,7 @@ function endsWithArrow(text) {
     return text.trimEnd().endsWith('->');
 }
 function isFunctionDeclarationInvocationLine(maskedLine, callMatch) {
-    const declarationMatch = /^\s*fn\s+([a-zA-Z_][a-zA-Z0-9_]*)(?:\s*:\s*\[[^\]]+\])?\s*\(/.exec(maskedLine);
+    const declarationMatch = /^\s*(?:pub\s+)?fn\s+([a-zA-Z_][a-zA-Z0-9_]*)(?:\s*:\s*\[[^\]]+\])?\s*\(/.exec(maskedLine);
     if (!declarationMatch) {
         return false;
     }
